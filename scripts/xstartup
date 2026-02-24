@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# =============================================================
+# xstartup — VNC desktop session script
+# Launched by TigerVNC to start the desktop environment.
+# =============================================================
+
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+
+# Disable IBus/IME quirks that cause blank VNC screens with Xfce
+export XKL_XMODMAP_DISABLE=1
+export XAUTHORITY="${HOME}/.Xauthority"
+
+# Start a D-Bus session if not already running
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    eval "$(dbus-launch --sh-syntax)" || true
+fi
+
+# Faster compositor (no compositing in a VNC session)
+xfconf-query -c xfwm4 -p /general/use_compositing -t bool -s false 2>/dev/null || true
+
+# Launch XFCE
+exec startxfce4

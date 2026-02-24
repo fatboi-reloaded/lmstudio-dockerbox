@@ -1,0 +1,23 @@
+# Secrets — never commit these
+.env
+*.key
+*.pem
+*.cert
+
+# Docker build cache / local overrides
+docker-compose.override.yml
+docker-compose.local.yml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,114 @@
+# ============================================================
+# LM Studio — Dockerized with NVIDIA GPU + noVNC + Tailscale
+# ============================================================
+#
+# Access: http://<tailscale-hostname>:6080/vnc.html
+#
+# Usage:
+#   cp .env.example .env   # fill in TS_AUTHKEY and VNC_PASSWORD
+#   docker compose up -d --build
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  # Tailscale sidecar
+  # All traffic in/out of the lmstudio container flows through
+  # this container's network namespace.
+  # ----------------------------------------------------------
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: lmstudio-tailscale
+    hostname: ${TS_HOSTNAME:-lmstudio}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:?TS_AUTHKEY is required — see .env.example}
+      - TS_STATE_DIR=/var/lib/tailscale
+      # Add --advertise-tags if you use ACL tags, e.g.: --advertise-tags=tag:servers
+      - TS_EXTRA_ARGS=${TS_EXTRA_ARGS:---accept-routes}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "tailscale", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ----------------------------------------------------------
+  # LM Studio desktop
+  # Shares the Tailscale network namespace — no host ports
+  # are exposed; the only path in is via Tailscale.
+  # ----------------------------------------------------------
+  lmstudio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # latest = always pull current stable via the redirect URL
+        # Pin a release by setting LMS_VERSION + LMS_DEB_URL in .env
+        LMS_VERSION: ${LMS_VERSION:-latest}
+        LMS_DEB_URL: ${LMS_DEB_URL:-https://lmstudio.ai/download/latest/linux/x64?format=deb}
+        CUDA_VERSION: ${CUDA_VERSION:-12.3.1}
+        UBUNTU_VERSION: "22.04"
+    image: dockerized-lmstudio:${LMS_VERSION:-0.3.9}
+    container_name: lmstudio-desktop
+
+    # Share the Tailscale container's network — this is the key
+    # pattern that makes noVNC reachable only via the tailnet.
+    network_mode: "service:tailscale"
+
+    depends_on:
+      tailscale:
+        condition: service_healthy
+
+    environment:
+      - VNC_PASSWORD=${VNC_PASSWORD:?VNC_PASSWORD is required — see .env.example}
+      - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
+      - DISPLAY=:1
+      # NVIDIA runtime
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+    volumes:
+      # Models are large — keep them in a named volume for persistence
+      - lmstudio-models:/home/lmuser/.cache/lm-studio
+      # Persist app settings, API server config, etc.
+      - lmstudio-config:/home/lmuser/.config/lm-studio
+      # Shared memory for GPU workloads
+    shm_size: '4gb'
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+
+    restart: unless-stopped
+
+    healthcheck:
+      # Check noVNC websocket is up
+      test: ["CMD-SHELL", "curl -sf http://localhost:${NOVNC_PORT:-6080}/ > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# ----------------------------------------------------------
+# Volumes
+# ----------------------------------------------------------
+volumes:
+  tailscale-state:
+    driver: local
+
+  lmstudio-models:
+    driver: local
+
+  lmstudio-config:
+    driver: local
