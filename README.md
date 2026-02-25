@@ -12,6 +12,11 @@ Browser (any device on Tailnet)
   │         │                       │
   │  noVNC :6080  ──→  VNC :5901    │
   │  SSH   :2222 (key auth, no root)│
+  │         │                       │
+  │    supervisord (PID 1)          │  ← process supervisor
+  │      ├─ SSH (lmuser)            │
+  │      ├─ VNC (lmuser)            │
+  │      └─ noVNC (lmuser)          │
   │                       │         │
   │              XFCE desktop       │
   │                       │         │
@@ -124,9 +129,52 @@ docker compose up -d lmstudio
 
 Models survive `docker compose down`. To **also** remove them: `docker compose down -v`.
 
+## Service Management
+
+The container uses **supervisord** to manage services (SSH, VNC, noVNC). This provides automatic restart on crashes and easy service control.
+
+### View service status:
+```bash
+docker compose exec lmstudio supervisorctl status
+```
+
+Expected output:
+```
+novnc    RUNNING   pid 52, uptime 0:15:23
+sshd     RUNNING   pid 53, uptime 0:15:23  # (if SSH key configured)
+vnc      RUNNING   pid 51, uptime 0:15:23
+```
+
+### Restart a specific service:
+```bash
+docker compose exec lmstudio supervisorctl restart vnc
+docker compose exec lmstudio supervisorctl restart novnc
+docker compose exec lmstudio supervisorctl restart sshd
+```
+
+### Stop/start services:
+```bash
+docker compose exec lmstudio supervisorctl stop novnc
+docker compose exec lmstudio supervisorctl start novnc
+```
+
+### View service logs:
+```bash
+docker compose exec lmstudio tail -f /var/log/supervisor/vnc-stdout.log
+docker compose exec lmstudio tail -f /var/log/supervisor/sshd-stderr.log
+docker compose exec lmstudio tail -f /var/log/supervisor/novnc-stdout.log
+```
+
+### Interactive control (advanced):
+```bash
+docker compose exec lmstudio supervisorctl
+# Then use: status, restart <service>, tail -f <service>, help
+```
+
 ## Architecture notes
 
 - **Tailscale sidecar** — the `lmstudio` container uses `network_mode: service:tailscale`, meaning it shares the Tailscale container's network namespace. Port 6080 (noVNC) is reachable *only* via your tailnet — it is never bound to a host port.
+- **Supervisord process manager** — runs as PID 1 and manages all services (SSH, VNC, noVNC). Automatically restarts crashed services and provides centralized logging to `/var/log/supervisor/`. Services run as unprivileged user `lmuser`.
 - **Multi-stage Dockerfile** — stage 1 downloads and extracts the LM Studio AppImage (avoiding FUSE at runtime); stage 2 is the lean CUDA + XFCE + VNC runtime.
 - **noVNC** — browser-based VNC client served over HTTP on port 6080. VNC password is required.
 - **GPU passthrough** — uses Docker Compose's `deploy.resources.reservations.devices` syntax. Requires `nvidia-container-toolkit`.
@@ -136,11 +184,37 @@ Models survive `docker compose down`. To **also** remove them: `docker compose d
 **Container exits immediately:**
 ```bash
 docker compose logs lmstudio
+# Check supervisord logs specifically:
+docker compose exec lmstudio cat /var/log/supervisor/supervisord.log
+```
+
+**Check service status:**
+```bash
+docker compose exec lmstudio supervisorctl status
+# View specific service logs:
+docker compose exec lmstudio cat /var/log/supervisor/vnc-stderr.log
 ```
 
 **VNC blank screen:**
-- Check `VNC_RESOLUTION` is supported by your display.
-- Try a smaller resolution, e.g. `1280x720`.
+- Check VNC service status: `docker compose exec lmstudio supervisorctl status vnc`
+- View VNC logs: `docker compose exec lmstudio tail -f /var/log/supervisor/vnc-stdout.log`
+- Check `VNC_RESOLUTION` is supported by your display
+- Try a smaller resolution, e.g. `1280x720`
+- Restart VNC: `docker compose exec lmstudio supervisorctl restart vnc`
+
+**SSH connection refused:**
+- Check SSH status: `docker compose exec lmstudio supervisorctl status sshd`
+- View SSH logs: `docker compose exec lmstudio cat /var/log/supervisor/sshd-stderr.log`
+- Ensure you're connecting as `lmuser`: `ssh -i <key> -p 2222 lmuser@<hostname>`
+- Verify public key was mounted: `docker compose exec lmstudio cat /home/lmuser/.ssh/authorized_keys`
+
+**Service crashed or not responding:**
+```bash
+# Restart the specific service
+docker compose exec lmstudio supervisorctl restart vnc
+# Or restart all services
+docker compose restart lmstudio
+```
 
 **GPU not visible inside container:**
 ```bash
