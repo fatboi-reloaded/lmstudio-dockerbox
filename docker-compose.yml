@@ -54,7 +54,7 @@ services:
         LMS_VERSION: ${LMS_VERSION:-latest}
         LMS_DEB_URL: ${LMS_DEB_URL:-https://lmstudio.ai/download/latest/linux/x64?format=deb}
         CUDA_VERSION: ${CUDA_VERSION:-12.3.1}
-        UBUNTU_VERSION: "22.04"
+        UBUNTU_VERSION: ${UBUNTU_VERSION:-22.04}
     image: dockerized-lmstudio:${LMS_VERSION:-0.3.9}
     container_name: lmstudio-desktop
 
@@ -70,6 +70,8 @@ services:
       - VNC_PASSWORD=${VNC_PASSWORD:?VNC_PASSWORD is required — see .env.example}
       - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
       - DISPLAY=:1
+      # SSH key-based authentication
+      - SSH_PUBLIC_KEY_PATH=${SSH_PUBLIC_KEY_PATH:-}
       # NVIDIA runtime
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
@@ -79,8 +81,10 @@ services:
       - lmstudio-models:/home/lmuser/.cache/lm-studio
       # Persist app settings, API server config, etc.
       - lmstudio-config:/home/lmuser/.config/lm-studio
+      # SSH public key (optional — mount if provided)
+      - ${SSH_PUBLIC_KEY_PATH:-/dev/null}:/tmp/ssh_public_key:ro
       # Shared memory for GPU workloads
-    shm_size: '4gb'
+    shm_size: ${SHM_SIZE:-4gb}
 
     deploy:
       resources:
