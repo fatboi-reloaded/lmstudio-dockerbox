@@ -80,6 +80,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto \
     iproute2 \
     python3 \
+    # -- SSH server --
+    openssh-server \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -132,10 +134,47 @@ RUN chmod +x /home/lmuser/scripts/*.sh /home/lmuser/scripts/xstartup
 RUN mkdir -p /home/lmuser/.config/autostart /home/lmuser/.cache/lm-studio \
     && chown -R lmuser:lmuser /home/lmuser/.config /home/lmuser/.cache
 
+# ---- SSH server configuration (non-privileged) --------------
+# Run sshd on port 2222 as lmuser - no root needed
+RUN mkdir -p /home/lmuser/.ssh /home/lmuser/sshd \
+    && chmod 700 /home/lmuser/.ssh \
+    # Create user-level sshd_config for port 2222
+    && mkdir -p /home/lmuser/.config/ssh \
+    && chown -R lmuser:lmuser /home/lmuser/.ssh /home/lmuser/.config /home/lmuser/sshd
+
+# Generate SSH host keys in user directory (as lmuser)
+USER lmuser
+RUN ssh-keygen -t rsa -f /home/lmuser/sshd/ssh_host_rsa_key -N '' \
+    && ssh-keygen -t ecdsa -f /home/lmuser/sshd/ssh_host_ecdsa_key -N '' \
+    && ssh-keygen -t ed25519 -f /home/lmuser/sshd/ssh_host_ed25519_key -N '' \
+    && chmod 600 /home/lmuser/sshd/ssh_host_*
+
+# Create custom sshd_config for non-root operation
+USER root
+RUN cat > /home/lmuser/sshd/sshd_config << 'EOF'
+Port 2222
+HostKey /home/lmuser/sshd/ssh_host_rsa_key
+HostKey /home/lmuser/sshd/ssh_host_ecdsa_key
+HostKey /home/lmuser/sshd/ssh_host_ed25519_key
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+PidFile /home/lmuser/sshd/sshd.pid
+EOF
+
+RUN chown lmuser:lmuser /home/lmuser/sshd/sshd_config
+
 # ---- Ports (documentation — Tailscale exposes these) -------
 # 5901 — VNC
 # 6080 — noVNC HTTP
-EXPOSE 5901 6080
+# 2222 — SSH (non-privileged port)
+EXPOSE 5901 6080 2222
 
 USER lmuser
 WORKDIR /home/lmuser

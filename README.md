@@ -11,6 +11,7 @@ Browser (any device on Tailnet)
   │  (shared network namespace)     │
   │         │                       │
   │  noVNC :6080  ──→  VNC :5901    │
+  │  SSH   :2222 (key auth, no root)│
   │                       │         │
   │              XFCE desktop       │
   │                       │         │
@@ -66,8 +67,43 @@ All settings live in `.env` (never committed — see `.env.example`).
 | `TS_HOSTNAME` | `lmstudio` | Node name on your tailnet |
 | `VNC_PASSWORD` | **required** | Browser VNC password (6-8 chars) |
 | `VNC_RESOLUTION` | `1920x1080` | Desktop resolution |
+| `SSH_PUBLIC_KEY_PATH` | *(empty)* | Path to SSH public key for key-based auth |
 | `LMS_VERSION` | `0.3.9` | LM Studio version to embed |
 | `CUDA_VERSION` | `12.3.1` | NVIDIA CUDA base image version |
+
+## SSH Access
+
+You can connect to the container via SSH using key-based authentication:
+
+1. **Generate an SSH key pair** (if you don't have one):
+   ```bash
+   ssh-keygen -t rsa -b 4096 -f ~/.ssh/lmstudio_key
+   ```
+
+2. **Set the public key path in `.env`**:
+   ```bash
+   SSH_PUBLIC_KEY_PATH=/home/user/.ssh/lmstudio_key.pub
+   ```
+
+3. **Rebuild and restart the container**:
+   ```bash
+   docker compose up -d --build
+   ```
+
+4. **Connect via SSH** (replace `lmstudio` with your `TS_HOSTNAME`):
+   ```bash
+   ssh -i ~/.ssh/lmstudio_key -p 2222 lmuser@lmstudio
+   ```
+   
+   **Important:** 
+   - You must connect as user `lmuser` (not your local username)
+   - You must specify your private key with `-i`
+   - Use port `2222` (not the default port 22)
+
+**Security notes:**
+- SSH runs on port **2222** (non-privileged) as user `lmuser` - no root access
+- Only accessible through your Tailscale network
+- Password authentication is disabled (key-based only)
 
 ## Updating LM Studio
 
