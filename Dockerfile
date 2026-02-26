@@ -150,6 +150,13 @@ RUN mkdir -p /home/lmuser/.lmstudio/bin \
     && ln -sf "/opt/LM Studio/resources/app/.webpack/lms" /home/lmuser/.lmstudio/bin/lms \
     && chown -R lmuser:lmuser /home/lmuser/.lmstudio
 
+# ---- Add lms CLI to PATH for interactive shells ------------
+# SSH login shells source .profile, interactive terminals source .bashrc
+# Non-interactive sessions must use full path for security
+RUN echo 'export PATH="/home/lmuser/.lmstudio/bin:$PATH"' >> /home/lmuser/.profile \
+    && echo 'export PATH="/home/lmuser/.lmstudio/bin:$PATH"' >> /home/lmuser/.bashrc \
+    && chown lmuser:lmuser /home/lmuser/.profile /home/lmuser/.bashrc
+
 # ---- Desktop launcher for LM Studio ------------------------
 RUN mkdir -p /usr/share/applications \
     && cat > /usr/share/applications/lmstudio.desktop << 'EOF'
