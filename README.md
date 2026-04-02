@@ -1,233 +1,279 @@
 # Dockerized LM Studio
 
-Run [LM Studio](https://lmstudio.ai) in a GPU-accelerated Docker container, accessible from anywhere on your private Tailscale network via a browser (noVNC).
+Run [LM Studio](https://lmstudio.ai) in a GPU-enabled Docker container with an XFCE desktop, noVNC browser access, and optional SSH, all reachable only through a Tailscale sidecar.
 
-```
-Browser (any device on Tailnet)
-        │
-        ▼  http://<hostname>:6080/vnc.html
-  ┌─────────────────────────────────┐
-  │  Tailscale sidecar              │  ← auth via TS_AUTHKEY
-  │  (shared network namespace)     │
-  │         │                       │
-  │  noVNC :6080  ──→  VNC :5901    │
-  │  SSH   :2222 (key auth, no root)│
-  │         │                       │
-  │    supervisord (PID 1)          │  ← process supervisor
-  │      ├─ SSH (lmuser)            │
-  │      ├─ VNC (lmuser)            │
-  │      └─ noVNC (lmuser)          │
-  │                       │         │
-  │              XFCE desktop       │
-  │                       │         │
-  │              LM Studio          │
-  │                (AppImage)       │
-  │                       │         │
-  │              NVIDIA GPU         │
-  └─────────────────────────────────┘
+```text
+Browser / SSH client on your tailnet
+        |
+        +--> http://<hostname>:6080/vnc.html
+        |
+        +--> ssh -p 2222 lmuser@<hostname>
+                    |
+                    v
+  +-----------------------------------------------+
+  | Tailscale sidecar (shared network namespace)  |
+  |   noVNC :6080 -> VNC :5901                    |
+  |   SSH   :2222                                 |
+  +---------------------------+-------------------+
+                              |
+                              v
+  +-----------------------------------------------+
+  | LM Studio container                           |
+  |   supervisord (as lmuser)                     |
+  |   XFCE desktop                                |
+  |   LM Studio (.deb install, --no-sandbox)      |
+  |   NVIDIA GPU passthrough                      |
+  +-----------------------------------------------+
 ```
 
 ## Prerequisites
 
 | Requirement | Notes |
 |---|---|
-| Docker ≥ 24 + Compose v2 | `docker compose version` |
-| [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) | `nvidia-ctk --version` |
-| Tailscale account + auth key | <https://login.tailscale.com/admin/settings/keys> |
+| Docker 24+ with Compose v2 | `docker compose version` |
+| NVIDIA Container Toolkit | <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html> |
+| Tailscale account and auth key | <https://login.tailscale.com/admin/settings/keys> |
 
-### Verify NVIDIA runtime is configured
+Verify GPU access before using this repo:
 
 ```bash
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
-docker run --rm --gpus all nvidia/cuda:12.3.1-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04 nvidia-smi
 ```
 
-## Quick start
+## Quick Start
 
 ```bash
-# 1. Clone and enter the repo
 git clone <this-repo> dockerized-lmstudio
 cd dockerized-lmstudio
-
-# 2. Create your .env
 cp .env.example .env
-# Edit .env — set TS_AUTHKEY and VNC_PASSWORD at minimum
-
-# 3. Build and start
-docker compose up -d --build
-
-# 4. Open LM Studio in your browser
-#    (replace 'lmstudio' with your TS_HOSTNAME)
-open http://lmstudio:6080/vnc.html
 ```
+
+Edit `.env` and set at minimum:
+
+- `TS_AUTHKEY`
+- `VNC_PASSWORD`
+
+Then build and start:
+
+```bash
+docker compose build lmstudio
+docker compose up -d
+```
+
+Open LM Studio in a browser on your tailnet:
+
+```bash
+http://<TS_HOSTNAME>:6080/vnc.html
+```
+
+## Build Model
+
+The image is built in two stages:
+
+1. A downloader stage fetches the LM Studio `.deb`.
+2. The runtime stage installs that `.deb` into the CUDA/XFCE environment.
+
+`LMS_DEB_SHA512` is optional. If you set it, the build verifies the downloaded package checksum. If you leave it empty, the build prints the SHA-512 and continues.
+
+### Checksum flow
+
+1. Leave `LMS_DEB_SHA512=` empty in `.env`.
+2. Run `docker compose build lmstudio`.
+3. Note the printed downloaded `.deb` SHA-512.
+4. Set `LMS_DEB_SHA512` if you want future builds to enforce that exact artifact.
+
+### Tracking `latest`
+
+By default, the build uses:
+
+- `LMS_VERSION=latest`
+- `LMS_DEB_URL=https://lmstudio.ai/download/latest/linux/x64?format=deb`
+
+If the upstream `latest` redirect changes but Docker wants to reuse cache, set a new value for `LMS_REFRESH_TOKEN` and rebuild. Any non-empty changed value is fine.
+
+To pin a release, set both:
+
+- `LMS_VERSION=<version>`
+- `LMS_DEB_URL=<versioned .deb URL>`
+
+Then optionally update `LMS_DEB_SHA512` for that exact package.
 
 ## Configuration
 
-All settings live in `.env` (never committed — see `.env.example`).
+All settings live in `.env`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TS_AUTHKEY` | **required** | Tailscale auth key |
-| `TS_HOSTNAME` | `lmstudio` | Node name on your tailnet |
-| `VNC_PASSWORD` | **required** | Browser VNC password (6-8 chars) |
-| `VNC_RESOLUTION` | `1920x1080` | Desktop resolution |
-| `SSH_PUBLIC_KEY_PATH` | *(empty)* | Path to SSH public key for key-based auth |
-| `LMS_VERSION` | `0.3.9` | LM Studio version to embed |
-| `CUDA_VERSION` | `12.3.1` | NVIDIA CUDA base image version |
+| `TS_AUTHKEY` | required | Tailscale auth key |
+| `TS_HOSTNAME` | `lmstudio` | Tailscale hostname |
+| `TS_EXTRA_ARGS` | `--accept-routes` | Extra `tailscaled` flags |
+| `VNC_PASSWORD` | required | VNC password, 6-8 characters |
+| `VNC_RESOLUTION` | `1920x1080` | VNC desktop resolution |
+| `NOVNC_PORT` | `6080` | noVNC HTTP port inside the shared netns |
+| `LMS_VERSION` | `latest` | Label for the LM Studio version you intend to install |
+| `LMS_DEB_URL` | latest stable redirect | Download URL for the LM Studio `.deb` |
+| `LMS_DEB_SHA512` | empty | Optional SHA-512 for the downloaded `.deb`; enforced only when set |
+| `LMS_REFRESH_TOKEN` | empty | Optional cache-busting token for `latest` builds |
+| `CUDA_BASE_IMAGE` | `nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04` | Full NVIDIA CUDA base image reference |
+| `SHM_SIZE` | `4gb` | Shared memory for GPU workloads |
+| `SSH_PUBLIC_KEY_PATH` | empty | Optional mounted public key for SSH access |
 
-## SSH Access
+## Access
 
-You can connect to the container via SSH using key-based authentication:
+### Browser
 
-1. **Generate an SSH key pair** (if you don't have one):
-   ```bash
-   ssh-keygen -t rsa -b 4096 -f ~/.ssh/lmstudio_key
-   ```
-
-2. **Set the public key path in `.env`**:
-   ```bash
-   SSH_PUBLIC_KEY_PATH=/home/user/.ssh/lmstudio_key.pub
-   ```
-
-3. **Rebuild and restart the container**:
-   ```bash
-   docker compose up -d --build
-   ```
-
-4. **Connect via SSH** (replace `lmstudio` with your `TS_HOSTNAME`):
-   ```bash
-   ssh -i ~/.ssh/lmstudio_key -p 2222 lmuser@lmstudio
-   ```
-   
-   **Important:** 
-   - You must connect as user `lmuser` (not your local username)
-   - You must specify your private key with `-i`
-   - Use port `2222` (not the default port 22)
-
-**Security notes:**
-- SSH runs on port **2222** (non-privileged) as user `lmuser` - no root access
-- Only accessible through your Tailscale network
-- Password authentication is disabled (key-based only)
-
-## Updating LM Studio
-
-Change `LMS_VERSION` in `.env` (and optionally `LMS_APPIMAGE_URL` if the download URL pattern changed), then rebuild:
+Use noVNC from any device on your tailnet:
 
 ```bash
-docker compose build --no-cache lmstudio
-docker compose up -d lmstudio
+http://<TS_HOSTNAME>:6080/vnc.html
 ```
 
-## Persistent data
+### SSH
+
+If `SSH_PUBLIC_KEY_PATH` points to a valid public key, the container enables SSH on port `2222`.
+
+Recommended key type:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/lmstudio_key
+```
+
+Set:
+
+```bash
+SSH_PUBLIC_KEY_PATH=/home/user/.ssh/lmstudio_key.pub
+```
+
+Then rebuild or restart the service:
+
+```bash
+docker compose up -d --build
+```
+
+Connect with:
+
+```bash
+ssh -i ~/.ssh/lmstudio_key -p 2222 lmuser@<TS_HOSTNAME>
+```
+
+Notes:
+
+- SSH is key-only. Password auth is disabled.
+- Root login is disabled.
+- SSH host keys are generated on first start and persisted in the `lmstudio-config` volume under `/home/lmuser/.config/sshd`.
+
+### CLI
+
+The container exposes `lms` on `PATH` for `lmuser` through a wrapper that discovers the installed LM Studio CLI at runtime:
+
+```bash
+docker compose exec lmstudio bash -lc 'which lms && lms --help'
+```
+
+## Persistent Data
 
 | Volume | Container path | Contents |
 |---|---|---|
+| `tailscale-state` | `/var/lib/tailscale` | Tailscale identity and state |
 | `lmstudio-models` | `/home/lmuser/.cache/lm-studio` | Downloaded models |
-| `lmstudio-config` | `/home/lmuser/.config/LM Studio` | App settings |
-| `tailscale-state` | `/var/lib/tailscale` | Tailscale node state |
+| `lmstudio-config` | `/home/lmuser/.config` | LM Studio settings, autostart files, SSH host keys |
 
-Models survive `docker compose down`. To **also** remove them: `docker compose down -v`.
+Remove everything, including models and persisted config:
 
-## Service Management
+```bash
+docker compose down -v
+```
 
-The container uses **supervisord** to manage services (SSH, VNC, noVNC). This provides automatic restart on crashes and easy service control.
+## Operations
 
-### View service status:
+The container uses `supervisord`, but it now runs as `lmuser` and keeps its socket and logs under:
+
+```text
+/home/lmuser/.supervisor
+```
+
+Examples:
+
 ```bash
 docker compose exec lmstudio supervisorctl status
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/vnc-stdout.log
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/novnc-stderr.log
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/sshd-stderr.log
 ```
 
-Expected output:
-```
-novnc    RUNNING   pid 52, uptime 0:15:23
-sshd     RUNNING   pid 53, uptime 0:15:23  # (if SSH key configured)
-vnc      RUNNING   pid 51, uptime 0:15:23
-```
+LM Studio itself is launched through a wrapper script that discovers the installed binary path at runtime and always applies the Electron sandbox-disabling flags required in this container.
 
-### Restart a specific service:
-```bash
-docker compose exec lmstudio supervisorctl restart vnc
-docker compose exec lmstudio supervisorctl restart novnc
-docker compose exec lmstudio supervisorctl restart sshd
-```
+## Security Notes
 
-### Stop/start services:
-```bash
-docker compose exec lmstudio supervisorctl stop novnc
-docker compose exec lmstudio supervisorctl start novnc
-```
-
-### View service logs:
-```bash
-docker compose exec lmstudio tail -f /var/log/supervisor/vnc-stdout.log
-docker compose exec lmstudio tail -f /var/log/supervisor/sshd-stderr.log
-docker compose exec lmstudio tail -f /var/log/supervisor/novnc-stdout.log
-```
-
-### Interactive control (advanced):
-```bash
-docker compose exec lmstudio supervisorctl
-# Then use: status, restart <service>, tail -f <service>, help
-```
-
-## Architecture notes
-
-- **Tailscale sidecar** — the `lmstudio` container uses `network_mode: service:tailscale`, meaning it shares the Tailscale container's network namespace. Port 6080 (noVNC) is reachable *only* via your tailnet — it is never bound to a host port.
-- **Supervisord process manager** — runs as PID 1 and manages all services (SSH, VNC, noVNC). Automatically restarts crashed services and provides centralized logging to `/var/log/supervisor/`. Services run as unprivileged user `lmuser`.
-- **Multi-stage Dockerfile** — stage 1 downloads and extracts the LM Studio AppImage (avoiding FUSE at runtime); stage 2 is the lean CUDA + XFCE + VNC runtime.
-- **noVNC** — browser-based VNC client served over HTTP on port 6080. VNC password is required.
-- **GPU passthrough** — uses Docker Compose's `deploy.resources.reservations.devices` syntax. Requires `nvidia-container-toolkit`.
+- The `tailscale` sidecar drops all capabilities and only adds back `NET_ADMIN`.
+- The `tailscale` sidecar sets `no-new-privileges:true`.
+- The `lmstudio` entrypoint starts as `root` to initialize mounted volumes, VNC state, and SSH host keys, then drops to `lmuser` via `gosu` for long-running services.
+- `/tmp` in the LM Studio container is backed by `tmpfs`.
+- No host ports are published; access is through the Tailscale sidecar's network namespace.
+- LM Studio is launched with `--no-sandbox --disable-setuid-sandbox` because Electron sandboxing is not reliable in this containerized desktop setup.
 
 ## Troubleshooting
 
-**Container exits immediately:**
+### Build fails asking for `LMS_DEB_SHA512`
+
+Set `LMS_DEB_SHA512` only if you want checksum enforcement. If it is set and the build fails, update it to the SHA-512 printed for the downloaded package.
+
+### noVNC is unreachable
+
 ```bash
-docker compose logs lmstudio
-# Check supervisord logs specifically:
-docker compose exec lmstudio cat /var/log/supervisor/supervisord.log
+docker compose logs tailscale
+docker compose exec lmstudio supervisorctl status
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/novnc-stdout.log
 ```
 
-**Check service status:**
+### SSH is unavailable
+
 ```bash
 docker compose exec lmstudio supervisorctl status
-# View specific service logs:
-docker compose exec lmstudio cat /var/log/supervisor/vnc-stderr.log
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/sshd-stderr.log
+docker compose exec lmstudio ls -l /home/lmuser/.ssh/authorized_keys
 ```
 
-**VNC blank screen:**
-- Check VNC service status: `docker compose exec lmstudio supervisorctl status vnc`
-- View VNC logs: `docker compose exec lmstudio tail -f /var/log/supervisor/vnc-stdout.log`
-- Check `VNC_RESOLUTION` is supported by your display
-- Try a smaller resolution, e.g. `1280x720`
-- Restart VNC: `docker compose exec lmstudio supervisorctl restart vnc`
+Confirm `SSH_PUBLIC_KEY_PATH` points to a valid mounted public key and that you are connecting as `lmuser`.
 
-**SSH connection refused:**
-- Check SSH status: `docker compose exec lmstudio supervisorctl status sshd`
-- View SSH logs: `docker compose exec lmstudio cat /var/log/supervisor/sshd-stderr.log`
-- Ensure you're connecting as `lmuser`: `ssh -i <key> -p 2222 lmuser@<hostname>`
-- Verify public key was mounted: `docker compose exec lmstudio cat /home/lmuser/.ssh/authorized_keys`
+### Blank or broken desktop session
 
-**Service crashed or not responding:**
 ```bash
-# Restart the specific service
-docker compose exec lmstudio supervisorctl restart vnc
-# Or restart all services
+docker compose exec lmstudio supervisorctl status
+docker compose exec lmstudio tail -f /home/lmuser/.supervisor/vnc-stderr.log
+```
+
+Try a smaller `VNC_RESOLUTION`, then restart the service:
+
+```bash
 docker compose restart lmstudio
 ```
 
-**GPU not visible inside container:**
+If LM Studio itself does not launch, inspect the wrapper-discovered paths:
+
+```bash
+docker compose exec lmstudio bash -lc 'which lms && lms --help || true'
+docker compose exec lmstudio bash -lc 'find /opt /usr -maxdepth 6 \( -name "lm-studio" -o -name "lmstudio" -o -name "lms" \) 2>/dev/null | sort'
+```
+
+### GPU not visible
+
 ```bash
 docker compose exec lmstudio nvidia-smi
 ```
-If this fails, verify `nvidia-container-toolkit` is installed and Docker daemon is using the NVIDIA runtime.
 
-**Tailscale not connecting:**
-```bash
-docker compose logs tailscale
-docker compose exec tailscale tailscale status
-```
-Ensure your `TS_AUTHKEY` is valid and not expired.
+If that fails, re-check the NVIDIA Container Toolkit installation and Docker runtime configuration on the host.
 
-**LM Studio AppImage download fails during build:**
-Check the `LMS_APPIMAGE_URL` in your `.env` / compose args. The URL pattern can change between releases. Find the correct URL at <https://lmstudio.ai/download>.
+## Rollback Scope
+
+This hardening pass touched these files:
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `scripts/entrypoint.sh`
+- `.env.example`
+- `README.md`
+
+If you need to revert the hardening work, those are the files to review or reset.

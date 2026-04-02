@@ -17,7 +17,8 @@ services:
   # this container's network namespace.
   # ----------------------------------------------------------
   tailscale:
-    image: tailscale/tailscale:latest
+    image: tailscale/tailscale:stable
+    pull_policy: always
     container_name: lmstudio-tailscale
     hostname: ${TS_HOSTNAME:-lmstudio}
     environment:
@@ -27,10 +28,14 @@ services:
       - TS_EXTRA_ARGS=${TS_EXTRA_ARGS:---accept-routes}
     volumes:
       - tailscale-state:/var/lib/tailscale
+    devices:
       - /dev/net/tun:/dev/net/tun
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "tailscale", "status"]
@@ -46,6 +51,7 @@ services:
   # ----------------------------------------------------------
   lmstudio:
     build:
+      pull: true
       context: .
       dockerfile: Dockerfile
       args:
@@ -53,9 +59,10 @@ services:
         # Pin a release by setting LMS_VERSION + LMS_DEB_URL in .env
         LMS_VERSION: ${LMS_VERSION:-latest}
         LMS_DEB_URL: ${LMS_DEB_URL:-https://lmstudio.ai/download/latest/linux/x64?format=deb}
-        CUDA_VERSION: ${CUDA_VERSION:-12.3.1}
-        UBUNTU_VERSION: ${UBUNTU_VERSION:-22.04}
-    image: dockerized-lmstudio:${LMS_VERSION:-0.3.9}
+        LMS_DEB_SHA512: ${LMS_DEB_SHA512:-}
+        LMS_REFRESH_TOKEN: ${LMS_REFRESH_TOKEN:-}
+        CUDA_BASE_IMAGE: ${CUDA_BASE_IMAGE:-nvidia/cuda:13.2.0-cudnn-devel-ubuntu24.04}
+    image: dockerized-lmstudio:${LMS_VERSION:-latest}
     container_name: lmstudio-desktop
 
     # Share the Tailscale container's network — this is the key
@@ -69,6 +76,7 @@ services:
     environment:
       - VNC_PASSWORD=${VNC_PASSWORD:?VNC_PASSWORD is required — see .env.example}
       - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
+      - NOVNC_PORT=${NOVNC_PORT:-6080}
       - DISPLAY=:1
       # SSH key-based authentication
       - SSH_PUBLIC_KEY_PATH=${SSH_PUBLIC_KEY_PATH:-}
@@ -79,12 +87,13 @@ services:
     volumes:
       # Models are large — keep them in a named volume for persistence
       - lmstudio-models:/home/lmuser/.cache/lm-studio
-      # Persist app settings, API server config, etc.
-      - lmstudio-config:/home/lmuser/.config/lm-studio
+      # Persist app settings plus SSH host keys generated on first run.
+      - lmstudio-config:/home/lmuser/.config
       # SSH public key (optional — mount if provided)
       - ${SSH_PUBLIC_KEY_PATH:-/dev/null}:/tmp/ssh_public_key:ro
-      # Shared memory for GPU workloads
     shm_size: ${SHM_SIZE:-4gb}
+    tmpfs:
+      - /tmp
 
     deploy:
       resources:

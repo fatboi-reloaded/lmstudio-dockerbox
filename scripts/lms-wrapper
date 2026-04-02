@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+find_lms_bin() {
+    local candidate
+    for candidate in \
+        "/opt/LM Studio/resources/app/.webpack/lms" \
+        "/opt/LM Studio/resources/app/.webpack/main/lms" \
+        "/opt/LM Studio/resources/bin/lms" \
+        "/opt/lmstudio/resources/app/.webpack/lms" \
+        "/opt/lmstudio/resources/app/.webpack/main/lms" \
+        "/opt/lmstudio/resources/bin/lms" \
+        "/usr/bin/lms"
+    do
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    candidate="$(find /opt /usr -maxdepth 6 -type f -name 'lms' 2>/dev/null | head -n 1 || true)"
+    [[ -n "${candidate}" ]] || return 1
+    printf '%s\n' "${candidate}"
+}
+
+LMS_BIN="$(find_lms_bin || true)"
+if [[ -z "${LMS_BIN}" ]]; then
+    echo "[lms-wrapper] ERROR: could not locate the lms CLI inside the LM Studio install." >&2
+    exit 1
+fi
+
+exec "${LMS_BIN}" "$@"

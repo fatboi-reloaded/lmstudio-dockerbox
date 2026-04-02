@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================
-# entrypoint.sh — Container startup for dockerized-lmstudio
-# 
-# NEW WITH SUPERVISORD:
-# This script now ONLY does setup tasks, then hands control
-# to supervisord for process management.
-#
-# Responsibilities:
-#   1. Configure SSH (if key provided)
-#   2. Configure VNC password
-#   3. Set up XFCE desktop environment
-#   4. Enable SSH in supervisord (if configured)
-#   5. exec supervisord (takes over as PID 1)
+# entrypoint.sh — setup runtime state, then drop privileges and
+# hand off to supervisord.
 # =============================================================
 
 set -euo pipefail
 
-# ---- Configuration ------------------------------------------
 LMUSER_HOME="/home/lmuser"
+SUPERVISOR_CONF_DIR="/etc/supervisor/conf.d"
+SUPERVISOR_OPTIONAL_DIR="/etc/supervisor/optional.d"
 
-# ---- helpers ------------------------------------------------
 log()  { echo "[entrypoint] $*"; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 
@@ -27,106 +17,107 @@ log "=============================================="
 log "Starting LM Studio container setup..."
 log "=============================================="
 
-# ---- sanity checks ------------------------------------------
 [[ -z "${VNC_PASSWORD:-}" ]] && die "VNC_PASSWORD environment variable is not set."
-[[ ${#VNC_PASSWORD} -lt 6 ]] && die "VNC_PASSWORD must be at least 6 characters (VNC limit)."
+[[ ${#VNC_PASSWORD} -lt 6 || ${#VNC_PASSWORD} -gt 8 ]] && die "VNC_PASSWORD must be 6-8 characters (VNC protocol limit)."
 
-# ---- SSH server setup ---------------------------------------
+mkdir -p \
+    "${LMUSER_HOME}" \
+    "${LMUSER_HOME}/.cache/lm-studio" \
+    "${LMUSER_HOME}/.config/autostart" \
+    "${LMUSER_HOME}/.config/sshd" \
+    "${LMUSER_HOME}/.lmstudio/bin" \
+    "${LMUSER_HOME}/.ssh" \
+    "${LMUSER_HOME}/.supervisor" \
+    "${LMUSER_HOME}/.vnc"
+chmod 700 "${LMUSER_HOME}/.ssh"
+chown -R lmuser:lmuser \
+    "${LMUSER_HOME}" \
+    "${LMUSER_HOME}/.cache" \
+    "${LMUSER_HOME}/.config" \
+    "${LMUSER_HOME}/.lmstudio" \
+    "${LMUSER_HOME}/.ssh" \
+    "${LMUSER_HOME}/.supervisor" \
+    "${LMUSER_HOME}/.vnc"
+
 SSH_ENABLED=false
 if [[ -n "${SSH_PUBLIC_KEY_PATH:-}" ]] && [[ -f "/tmp/ssh_public_key" ]]; then
     log "Configuring SSH key-based authentication..."
-    
-    # Ensure .ssh directory exists with correct permissions
-    mkdir -p "${LMUSER_HOME}/.ssh"
-    chmod 700 "${LMUSER_HOME}/.ssh"
-    
-    # Copy the public key to authorized_keys
+    ssh-keygen -l -f /tmp/ssh_public_key >/dev/null 2>&1 || die "SSH_PUBLIC_KEY_PATH does not point to a valid public key."
+
     cat /tmp/ssh_public_key > "${LMUSER_HOME}/.ssh/authorized_keys"
     chmod 600 "${LMUSER_HOME}/.ssh/authorized_keys"
-    chown -R lmuser:lmuser "${LMUSER_HOME}/.ssh"
-    
+
+    if [[ ! -f "${LMUSER_HOME}/.config/sshd/ssh_host_ed25519_key" ]]; then
+        log "Generating SSH host keys..."
+        ssh-keygen -t rsa -f "${LMUSER_HOME}/.config/sshd/ssh_host_rsa_key" -N ''
+        ssh-keygen -t ecdsa -f "${LMUSER_HOME}/.config/sshd/ssh_host_ecdsa_key" -N ''
+        ssh-keygen -t ed25519 -f "${LMUSER_HOME}/.config/sshd/ssh_host_ed25519_key" -N ''
+        chmod 600 "${LMUSER_HOME}/.config/sshd/ssh_host_"*
+    fi
+
+    cp "${SUPERVISOR_OPTIONAL_DIR}/sshd.conf" "${SUPERVISOR_CONF_DIR}/sshd.conf"
     log "✓ SSH public key configured."
     log "  → Connect via: ssh -i <private-key> -p 2222 lmuser@<tailscale-hostname>"
     SSH_ENABLED=true
 else
+    rm -f "${SUPERVISOR_CONF_DIR}/sshd.conf" "${LMUSER_HOME}/.ssh/authorized_keys"
     log "SSH_PUBLIC_KEY_PATH not set or key file not found."
     log "SSH access is disabled. To enable:"
-    log "  1. Set SSH_PUBLIC_KEY_PATH=/path/to/your/id_rsa.pub in .env"
-    log "  2. Rebuild and restart the container"
+    log "  1. Set SSH_PUBLIC_KEY_PATH=/path/to/your/id_ed25519.pub in .env"
+    log "  2. Restart the container"
 fi
 
-# ---- VNC password -------------------------------------------
 log "Configuring VNC password..."
-mkdir -p "${LMUSER_HOME}/.vnc"
-echo "${VNC_PASSWORD}" | vncpasswd -f > "${LMUSER_HOME}/.vnc/passwd"
+VNC_PASSWD_BIN="$(command -v vncpasswd || command -v tigervncpasswd || true)"
+[[ -n "${VNC_PASSWD_BIN}" ]] || die "Neither vncpasswd nor tigervncpasswd is installed."
+echo "${VNC_PASSWORD}" | "${VNC_PASSWD_BIN}" -f > "${LMUSER_HOME}/.vnc/passwd"
 chmod 600 "${LMUSER_HOME}/.vnc/passwd"
-chown -R lmuser:lmuser "${LMUSER_HOME}/.vnc"
 log "✓ VNC password configured."
 
-# ---- xstartup (desktop session launched by VNC) -------------
 log "Setting up XFCE desktop session..."
-mkdir -p "${LMUSER_HOME}/.vnc"
-cp /home/lmuser/scripts/xstartup "${LMUSER_HOME}/.vnc/xstartup"
+cp /usr/local/bin/lmstudio/xstartup "${LMUSER_HOME}/.vnc/xstartup"
 chmod +x "${LMUSER_HOME}/.vnc/xstartup"
-chown lmuser:lmuser "${LMUSER_HOME}/.vnc/xstartup"
 log "✓ xstartup configured."
 
-# ---- XFCE autostart — launch LM Studio on login ------------
-mkdir -p "${LMUSER_HOME}/.config/autostart"
-cat > "${LMUSER_HOME}/.config/autostart/lmstudio.desktop" << 'DESKTOP'
+cat > "${LMUSER_HOME}/.config/autostart/lmstudio.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=LM Studio
-Exec="/opt/LM Studio/lm-studio" --no-sandbox
+Exec=/usr/local/bin/lmstudio/lmstudio-launcher
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 DESKTOP
-chown lmuser:lmuser "${LMUSER_HOME}/.config/autostart/lmstudio.desktop"
 log "✓ LM Studio autostart configured."
 
-# ---- Clean up any stale VNC locks ---------------------------
+ln -sf /usr/local/bin/lmstudio/lms-wrapper "${LMUSER_HOME}/.lmstudio/bin/lms"
+chown -h lmuser:lmuser "${LMUSER_HOME}/.lmstudio/bin/lms"
+log "✓ lms wrapper configured."
+
+if [[ -d /usr/share/applications ]]; then
+    while IFS= read -r desktop_file; do
+        sed -i 's#^Exec=.*#Exec=/usr/local/bin/lmstudio/lmstudio-launcher %U#' "${desktop_file}" || true
+    done < <(find /usr/share/applications -maxdepth 1 -type f \( -iname '*lmstudio*.desktop' -o -iname '*lm-studio*.desktop' \))
+fi
+
 VNC_LOCK="/tmp/.X1-lock"
 if [[ -f "${VNC_LOCK}" ]]; then
     log "Removing stale VNC lock files..."
     rm -f "${VNC_LOCK}" /tmp/.X11-unix/X1 2>/dev/null || true
 fi
 
-log "=============================================="
-log "Setup complete! Starting supervisord..."
-log "=============================================="
+chown -R lmuser:lmuser \
+    "${LMUSER_HOME}/.config" \
+    "${LMUSER_HOME}/.ssh" \
+    "${LMUSER_HOME}/.supervisor" \
+    "${LMUSER_HOME}/.vnc"
 
-# ---- Enable SSH in supervisord if configured ----------------
+log "=============================================="
 if [[ "${SSH_ENABLED}" == "true" ]]; then
-    # Modify supervisord config to autostart SSH
-    # This is done by passing a command after supervisord starts
-    # We'll use a wrapper approach: start supervisord in background,
-    # enable SSH, then bring it to foreground
-    
-    log "Enabling SSH service in supervisord..."
-    # Start supervisord in background briefly
-    /usr/bin/supervisord -c /etc/supervisor/supervisord.conf &
-    SUPERVISOR_PID=$!
-    
-    # Wait for supervisord to be ready (socket available)
-    for i in {1..10}; do
-        if [[ -S /var/run/supervisor.sock ]]; then
-            break
-        fi
-        sleep 0.5
-    done
-    
-    # Enable and start SSH
-    /usr/bin/supervisorctl start sshd
-    log "✓ SSH service started."
-    
-    # Now wait for supervisord (it's in foreground via nodaemon=true)
-    wait ${SUPERVISOR_PID}
+    log "Setup complete! Starting supervisord as lmuser with SSH enabled..."
 else
-    # No SSH, just start supervisord normally
-    log "Starting all services (VNC, noVNC)..."
-    exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
+    log "Setup complete! Starting supervisord as lmuser..."
 fi
+log "=============================================="
 
-# If we reach here, supervisord exited
-log "Supervisord exited."
+exec gosu lmuser /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
